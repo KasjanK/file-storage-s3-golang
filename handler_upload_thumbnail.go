@@ -42,7 +42,7 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 
 	file, header, err := r.FormFile("thumbnail")
 	if err != nil {
-		respondWithError(w, http.StatusBadGateway, "Unable to parse from file", err)
+		respondWithError(w, http.StatusBadRequest, "Unable to parse from file", err)
 		return
 	}
 	defer file.Close()
@@ -83,7 +83,7 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 
 	video, err := cfg.db.GetVideo(videoID)
 	if err != nil {
-		respondWithError(w, http.StatusNotFound, "Video not found", err)
+		respondWithError(w, http.StatusInternalServerError, "Could not find video", err)
 		return
 	}
 
