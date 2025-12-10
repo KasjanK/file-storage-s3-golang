@@ -5,7 +5,6 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"mime"
@@ -50,7 +49,7 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 	}
 
 	if video.UserID != userID {
-		respondWithError(w, http.StatusUnauthorized, "Could not access video", err)
+		respondWithError(w, http.StatusUnauthorized, "Could not access video", nil)
 		return
 	}
 
@@ -88,6 +87,12 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	_, err = tempFile.Seek(0, io.SeekStart)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Could not reset file pointer", err)
+		return
+	}
+
 	aspectRatio, err := getVideoAspectRatio(tempFile.Name())
 	if err != nil {
 		respondWithError(w, http.StatusInternalServerError, "Could not get aspect ratio of video", err)
@@ -103,7 +108,20 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		prefix = "other/"
 	}
 
-	tempFile.Seek(0, io.SeekStart)
+	fastStartFilePath, err := processVideoForFastStart(tempFile.Name())
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Could not process video", err)
+		return
+	}
+
+	defer os.Remove(fastStartFilePath)
+
+	fastStartFile, err := os.Open(fastStartFilePath)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Could not open fast start file", err)
+		return
+	}
+	defer fastStartFile.Close()
 
 	byteSlice := make([]byte, 32)
 	rand.Read(byteSlice)
@@ -112,7 +130,7 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 	_, err = cfg.s3Client.PutObject(r.Context(), &s3.PutObjectInput{
 		Bucket: 	 &cfg.s3Bucket,
 		Key:     	 &key,
-		Body:   	 tempFile,
+		Body:   	 fastStartFile,
 		ContentType: &mediaType,
 		},
 	)
@@ -138,7 +156,7 @@ func getVideoAspectRatio(filePath string) (string, error) {
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	if err := cmd.Run(); err != nil {
-    	return "", fmt.Errorf("ffmpeg error: %v", err)
+    	return "", fmt.Errorf("ffmprobe error: %v", err)
 	}
 
 	type parameters struct {
@@ -151,7 +169,7 @@ func getVideoAspectRatio(filePath string) (string, error) {
 	params := parameters{}
 	err := json.Unmarshal(out.Bytes(), &params)
 	if err != nil {
-		return "", errors.New("Could not unmarshal parameters")
+		return "", fmt.Errorf("Could not unmarshal parameters: %v", err)
 	}
 
 	ratio := "other"
@@ -164,4 +182,15 @@ func getVideoAspectRatio(filePath string) (string, error) {
 	}
 	
 	return ratio, nil
+}
+
+func processVideoForFastStart(filePath string) (string, error) {
+	outputFilePath := filePath + ".processing"
+
+	cmd := exec.Command("ffmpeg", "-i", filePath, "-c", "copy", "-movflags", "faststart", "-f", "mp4", outputFilePath)
+	if err := cmd.Run(); err != nil {
+		return "", fmt.Errorf("ffmpeg error: %v", err)
+	}
+
+	return outputFilePath, nil
 }
