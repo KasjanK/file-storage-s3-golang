@@ -1,13 +1,17 @@
 package main
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime"
 	"net/http"
 	"os"
+	"os/exec"
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -84,11 +88,26 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	aspectRatio, err := getVideoAspectRatio(tempFile.Name())
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Could not get aspect ratio of video", err)
+		return
+	}
+	
+	var prefix string
+	if aspectRatio == "16:9" {
+		prefix = "landscape/"
+	} else if aspectRatio == "9:16" {
+		prefix = "portrait/"
+	} else {
+		prefix = "other/"
+	}
+
 	tempFile.Seek(0, io.SeekStart)
 
 	byteSlice := make([]byte, 32)
 	rand.Read(byteSlice)
-	key := base64.RawURLEncoding.EncodeToString(byteSlice) + "." + fileExtension
+	key := prefix + base64.RawURLEncoding.EncodeToString(byteSlice) + "." + fileExtension
 
 	_, err = cfg.s3Client.PutObject(r.Context(), &s3.PutObjectInput{
 		Bucket: 	 &cfg.s3Bucket,
@@ -114,3 +133,35 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 	respondWithJSON(w, http.StatusOK, video)
 }
 
+func getVideoAspectRatio(filePath string) (string, error) {
+	cmd := exec.Command("ffprobe", "-v", "error", "-print_format", "json", "-show_streams", filePath)
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	if err := cmd.Run(); err != nil {
+    	return "", fmt.Errorf("ffmpeg error: %v", err)
+	}
+
+	type parameters struct {
+		Streams []struct {
+			Width  int `json:"width"`
+			Height int `json:"height"`
+		} `json:"streams"`
+	}
+
+	params := parameters{}
+	err := json.Unmarshal(out.Bytes(), &params)
+	if err != nil {
+		return "", errors.New("Could not unmarshal parameters")
+	}
+
+	ratio := "other"
+	height := params.Streams[0].Height
+	width := params.Streams[0].Width
+	if width == 16 * height / 9 {
+		ratio = "16:9"
+	} else if height == 16 * width / 9{
+		ratio = "9:16"
+	}
+	
+	return ratio, nil
+}
